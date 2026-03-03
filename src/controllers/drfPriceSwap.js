@@ -1784,7 +1784,7 @@ exports.buscaPrecoEmsys = async (req, res) => {
     console.log("=== PASSO 2: Buscando dados com JOINs ===");
 
     const querySelect = `
-      SELECT  
+      SELECT DISTINCT ON (a.id_preco, a.seq_preco, a.cod_empresa, a.cod_pessoa, a.cod_item, a.cod_condicao_pagamento)
         e.cod_empresa,
         e.nom_fantasia, 
         b.cod_pessoa,
@@ -1822,7 +1822,7 @@ exports.buscaPrecoEmsys = async (req, res) => {
       INNER JOIN ${schema}.tab_forma_pagto d ON (d.cod_forma_pagto = a.cod_condicao_pagamento) 
       INNER JOIN ${schema}.tab_empresa_schema e ON (e.cod_empresa = a.cod_empresa AND d.cod_empresa = e.cod_empresa) 
       LEFT JOIN ${schema}.tab_custo_preco f ON (f.cod_empresa = a.cod_empresa AND f.cod_item = a.cod_item)
-      ORDER BY e.nom_fantasia, b.nom_pessoa, c.des_item, d.ind_tipo, d.des_forma_pagto
+      ORDER BY a.id_preco, a.seq_preco, a.cod_empresa, a.cod_pessoa, a.cod_item, a.cod_condicao_pagamento, e.nom_fantasia, b.nom_pessoa, c.des_item, d.ind_tipo, d.des_forma_pagto
     `;
 
     console.log("Query Select:", querySelect);
