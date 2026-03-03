@@ -19,6 +19,7 @@ const io = new Server(server, {
       if (!origin) return callback(null, true);
       if (origin.endsWith(".vercel.app")) return callback(null, true);
       if (origin.endsWith(".railway.app")) return callback(null, true);
+      if (origin.endsWith(".digitalrf.com.br")) return callback(null, true);
 
       // Permitir qualquer IP da rede local 192.168.x.x
       if (origin && /^http:\/\/192\.168\.\d+\.\d+:\d+$/.test(origin)) {
