@@ -615,6 +615,8 @@ exports.buscaItemBomba = async (req, res) => {
   try {
     await db.query_trocaprecos("BEGIN");
 
+    console.log("[buscaItemBomba] Schema:", schema);
+    console.log("[buscaItemBomba] Empresas:", empresasSelecionadas);
 
     // Criar placeholders parametrizados para as empresas
     const placeholders = empresasSelecionadas
@@ -643,6 +645,7 @@ exports.buscaItemBomba = async (req, res) => {
       empresasSelecionadas,
     );
 
+    console.log("[buscaItemBomba] Itens encontrados:", item.rows.length);
 
     await db.query_trocaprecos("COMMIT");
 
@@ -675,6 +678,8 @@ exports.buscaFiltroItem = async (req, res) => {
   try {
     await db.query_trocaprecos("BEGIN");
 
+    console.log("[buscaFiltroItem] Schema:", schema);
+    console.log("[buscaFiltroItem] Empresas:", empresasSelecionadas);
 
     // Criar placeholders parametrizados para as empresas
     const placeholders = empresasSelecionadas
@@ -738,6 +743,8 @@ exports.buscaFiltroItem = async (req, res) => {
       empresasSelecionadas,
     );
 
+    console.log("[buscaFiltroItem] Itens:", item.rows.length);
+    console.log("[buscaFiltroItem] Formas pagto:", formaPagto.rows.length);
 
     await db.query_trocaprecos("COMMIT");
     res.status(200).json({
@@ -773,6 +780,7 @@ exports.buscaSubgruposPista = async (req, res) => {
   try {
     await db.query_trocaprecos("BEGIN");
 
+    console.log(
       `[buscaSubgruposPista] Iniciando - Schema: ${schema}, Empresas: ${empresasSelecionadas.join(", ")}`,
     );
 
@@ -838,6 +846,7 @@ exports.buscaSubgruposPista = async (req, res) => {
         );
         // Log dos primeiros itens para debug
         if (itensEmpresa.rows.length > 0) {
+          console.log(
             `[buscaSubgruposPista] Primeiros 3 itens:`,
             itensEmpresa.rows.slice(0, 3).map((i) => ({
               cod_item: i.cod_item,
@@ -1009,18 +1018,6 @@ exports.novaNegociacao = async (req, res) => {
   const { schema, cod_empresa, nom_usuario, cod_usuario, cliente, itens } =
     req.body;
 
-  // LOG CRÍTICO: Verificar dados recebidos do frontend
-  itens.slice(0, 3).forEach((item, idx) => {
-      ind_tipo_negociacao: item.ind_tipo_negociacao,
-      ind_percentual_valor: item.ind_percentual_valor,
-      ind_tipo_preco_base: item.ind_tipo_preco_base,
-      val_preco_venda_a: item.val_preco_venda_a,
-      val_preco_venda_b: item.val_preco_venda_b,
-      valor_calculado: item.valor_calculado,
-      valor: item.valor,
-    });
-  });
-
   try {
     res.status(200).json({
       message: "Negociações Enviadas, consulte Histórico!",
@@ -1061,14 +1058,6 @@ async function novaNegociacaoInsert(
   try {
     for (const c of cliente) {
       for (let i = 0; i < itens.length; i++) {
-        // LOG: Verificar valores antes do INSERT
-          ind_tipo_negociacao: itens[i].ind_tipo_negociacao,
-          ind_percentual_valor: itens[i].ind_percentual_valor,
-          val_preco_venda_a: itens[i].val_preco_venda_a,
-          valor_informado: itens[i].valor,
-          valor_calculado: itens[i].valor_calculado,
-        });
-
         // Executa a inserção dentro da transação
         await db.query_trocaprecos(
           `INSERT INTO ${schema}.tab_nova_regra ( seq_lote_alteracao,
@@ -1735,6 +1724,13 @@ exports.buscaPrecoEmsys = async (req, res) => {
     precoMenorQue,
   } = req.body;
 
+  console.log("=== buscaPrecoEmsys - Parâmetros recebidos ===");
+  console.log("Schema:", schema);
+  console.log("Empresas:", codEmpresa);
+  console.log("Items:", codItem);
+  console.log("Clientes:", codPessoa);
+  console.log("Formas Pagto:", codFormaPagto);
+  console.log(
     "Tipo Negociação:",
     tipoNegociacao,
     "| Tipo:",
@@ -1742,6 +1738,7 @@ exports.buscaPrecoEmsys = async (req, res) => {
     "| Length:",
     tipoNegociacao?.length,
   );
+  console.log("Preço Menor Que:", precoMenorQue);
 
   // Validar se pelo menos uma empresa foi selecionada
   if (!codEmpresa || codEmpresa.length === 0) {
@@ -1758,6 +1755,14 @@ exports.buscaPrecoEmsys = async (req, res) => {
         ? tipoNegociacao.trim().toUpperCase()
         : "";
 
+    console.log("=== PASSO 1: Chamando sp_busca_preco (popula tabela) ===");
+    console.log("Schema:", schema);
+    console.log("Empresas:", codEmpresa);
+    console.log("Items:", codItem);
+    console.log("Clientes:", codPessoa);
+    console.log("Formas Pagto:", codFormaPagto);
+    console.log("Tipo Preço:", tipoPreco);
+    console.log("Preço Menor Que:", precoMenorQue || 0);
 
     // PASSO 1: Chamar a stored procedure que popula a tabela tab_preco_emsys
     const queryProcedure = `SELECT ${schema}.sp_busca_preco($1, $2, $3, $4, $5, $6, $7)`;
@@ -1771,9 +1776,12 @@ exports.buscaPrecoEmsys = async (req, res) => {
       precoMenorQue || 0,
     ];
 
+    console.log("Query Procedure:", queryProcedure);
     await db.query_trocaprecos(queryProcedure, paramsProcedure);
+    console.log("✓ Procedure executada com sucesso");
 
     // PASSO 2: Buscar os dados da tabela com os JOINs
+    console.log("=== PASSO 2: Buscando dados com JOINs ===");
 
     const querySelect = `
       SELECT DISTINCT ON (a.id_preco, a.seq_preco, a.cod_empresa, a.cod_pessoa, a.cod_item, a.cod_condicao_pagamento)
@@ -1795,7 +1803,6 @@ exports.buscaPrecoEmsys = async (req, res) => {
         a.val_preco_venda_d,
         a.val_preco_venda_e,
         COALESCE(f.val_custo_medio, 0) as val_custo_medio,
-        COALESCE(f.val_preco_venda, 0) as val_preco_venda,
         a.cod_condicao_pagamento,
         a.des_observacao,
         a.num_chf,
@@ -1818,10 +1825,14 @@ exports.buscaPrecoEmsys = async (req, res) => {
       ORDER BY a.id_preco, a.seq_preco, a.cod_empresa, a.cod_pessoa, a.cod_item, a.cod_condicao_pagamento, e.nom_fantasia, b.nom_pessoa, c.des_item, d.ind_tipo, d.des_forma_pagto
     `;
 
+    console.log("Query Select:", querySelect);
     const result = await db.query_trocaprecos(querySelect);
 
+    console.log(`=== Resultados encontrados: ${result.rows.length} ===`);
     if (result.rows.length > 0) {
+      console.log("Primeira linha de exemplo:", result.rows[0]);
     } else {
+      console.log("⚠️ Nenhum resultado encontrado após os JOINs");
     }
 
     res.status(200).json({
