@@ -1018,6 +1018,21 @@ exports.novaNegociacao = async (req, res) => {
   const { schema, cod_empresa, nom_usuario, cod_usuario, cliente, itens } =
     req.body;
 
+  // LOG CRÍTICO: Verificar dados recebidos do frontend
+  console.log("=== BACKEND novaNegociacao - DADOS RECEBIDOS ===");
+  console.log("Total de itens:", itens.length);
+  itens.slice(0, 3).forEach((item, idx) => {
+    console.log(`Item ${idx + 1}:`, {
+      ind_tipo_negociacao: item.ind_tipo_negociacao,
+      ind_percentual_valor: item.ind_percentual_valor,
+      ind_tipo_preco_base: item.ind_tipo_preco_base,
+      val_preco_venda_a: item.val_preco_venda_a,
+      val_preco_venda_b: item.val_preco_venda_b,
+      valor_calculado: item.valor_calculado,
+      valor: item.valor,
+    });
+  });
+
   try {
     res.status(200).json({
       message: "Negociações Enviadas, consulte Histórico!",
@@ -1058,6 +1073,15 @@ async function novaNegociacaoInsert(
   try {
     for (const c of cliente) {
       for (let i = 0; i < itens.length; i++) {
+        // LOG: Verificar valores antes do INSERT
+        console.log(`📦 Executando INSERT - Item ${i + 1}:`, {
+          ind_tipo_negociacao: itens[i].ind_tipo_negociacao,
+          ind_percentual_valor: itens[i].ind_percentual_valor,
+          val_preco_venda_a: itens[i].val_preco_venda_a,
+          valor_informado: itens[i].valor,
+          valor_calculado: itens[i].valor_calculado,
+        });
+
         // Executa a inserção dentro da transação
         await db.query_trocaprecos(
           `INSERT INTO ${schema}.tab_nova_regra ( seq_lote_alteracao,
@@ -1803,6 +1827,7 @@ exports.buscaPrecoEmsys = async (req, res) => {
         a.val_preco_venda_d,
         a.val_preco_venda_e,
         COALESCE(f.val_custo_medio, 0) as val_custo_medio,
+        COALESCE(f.val_preco_venda, 0) as val_preco_venda,
         a.cod_condicao_pagamento,
         a.des_observacao,
         a.num_chf,
