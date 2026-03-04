@@ -1803,6 +1803,7 @@ exports.buscaPrecoEmsys = async (req, res) => {
         a.val_preco_venda_d,
         a.val_preco_venda_e,
         COALESCE(f.val_custo_medio, 0) as val_custo_medio,
+        COALESCE(f.val_preco_venda, 0) as val_preco_venda,
         a.cod_condicao_pagamento,
         a.des_observacao,
         a.num_chf,
