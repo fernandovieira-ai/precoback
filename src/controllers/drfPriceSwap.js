@@ -523,13 +523,13 @@ exports.buscaFiltro = async (req, res) => {
     const formaPagto = await db.query_trocaprecos(
       `select distinct cod_forma_pagto, des_forma_pagto, false as ind_selecionado, ind_tipo, false as ind_selecionado_todos from ${schema}.tab_forma_pagto where cod_empresa in (${cod_empresa}) order by cod_forma_pagto`,
     );
-    const itemFull = await db.query_trocaprecos(`select a.cod_item, a.des_item 
+    const itemFull = await db.query_trocaprecos(`select a.cod_item, a.des_item
                                       from ${schema}.tab_item a
                                       inner join ${schema}.tab_custo_preco b on (a.cod_item = b.cod_item)
-                                      inner join ${schema}.tab_item_empresa c on (c.cod_item = a.cod_item and c.cod_empresa = b.cod_empresa) 
-                                      where a.cod_subgrupo in (1, 43) 
+                                      inner join ${schema}.tab_item_empresa c on (c.cod_item = a.cod_item and c.cod_empresa = b.cod_empresa)
+                                      where a.cod_subgrupo in (1, 43)
                                       and b.cod_empresa in (${cod_empresa})
-                                      group by a.cod_item, a.des_item 
+                                      group by a.cod_item, a.des_item
                                       order by a.cod_item`);
     const tipoFormaPagto = await db.query_trocaprecos(`select ind_tipo,
                                             CASE ind_tipo
@@ -561,6 +561,81 @@ exports.buscaFiltro = async (req, res) => {
     await db.query_trocaprecos("ROLLBACK");
     res.status(500).json({
       message: "Falha em obter dados, tente novamente:" + error,
+    });
+  }
+};
+
+// Novo endpoint: Busca apenas custos/preços atualizados para itens específicos
+exports.buscaCustoPrecoItens = async (req, res) => {
+  let { schema, cod_empresa, itens } = req.body;
+
+  // Garantir que cod_empresa seja um inteiro
+  if (Array.isArray(cod_empresa)) {
+    cod_empresa = cod_empresa[0];
+  }
+  cod_empresa = parseInt(cod_empresa);
+
+  // Extrair array de cod_item
+  const codItens = itens.map((item) => item.cod_item);
+
+  try {
+    const query = `
+      SELECT
+        cod_item,
+        cod_empresa,
+        val_preco_venda,
+        val_custo_medio
+      FROM ${schema}.tab_custo_preco
+      WHERE cod_empresa = $1
+      AND cod_item = ANY($2::integer[])
+    `;
+
+    const result = await db.query_trocaprecos(query, [cod_empresa, codItens]);
+
+    res.status(200).json({
+      custosPrecos: result.rows,
+    });
+  } catch (error) {
+    console.error("[buscaCustoPrecoItens] Erro:", error.message);
+    res.status(500).json({
+      message: "Falha ao buscar custos/preços: " + error.message,
+    });
+  }
+};
+
+// Novo endpoint: Atualiza custos/preços apenas para itens selecionados
+exports.atualizaCustoPrecoPorItens = async (req, res) => {
+  let { schema, cod_empresa, itens } = req.body;
+
+  // Garantir que cod_empresa seja um inteiro (caso venha como array)
+  if (Array.isArray(cod_empresa)) {
+    cod_empresa = cod_empresa[0];
+  }
+  cod_empresa = parseInt(cod_empresa);
+
+  // Extrair array de cod_item dos itens selecionados
+  const codItens = itens.map((item) => item.cod_item);
+
+  try {
+    await db.query_trocaprecos("BEGIN");
+
+    // Usar a nova procedure sp_custo_preco_app que aceita arrays
+    const empresasArray = `ARRAY[${cod_empresa}]`;
+    const itensArray = `ARRAY[${codItens.join(",")}]`;
+    const query = `SELECT ${schema}.sp_custo_preco_app(${empresasArray}, ${itensArray})`;
+
+    await db.query_trocaprecos(query);
+    await db.query_trocaprecos("COMMIT");
+
+    res.status(200).json({
+      message: "Custos e preços atualizados com sucesso",
+      itensAtualizados: itens.length,
+    });
+  } catch (error) {
+    await db.query_trocaprecos("ROLLBACK");
+    console.error("[atualizaCustoPrecoPorItens] Erro:", error.message);
+    res.status(500).json({
+      message: "Falha ao atualizar custos/preços: " + error.message,
     });
   }
 };
@@ -688,22 +763,21 @@ exports.buscaFiltroItem = async (req, res) => {
 
     const item = await db.query_trocaprecos(
       `select distinct
-                                  a.cod_item, 
-                                  a.des_item, 
-                                  a.cod_barra, 
-                                  a.cod_subgrupo, 
+                                  a.cod_item,
+                                  a.des_item,
+                                  a.cod_barra,
+                                  a.cod_subgrupo,
                                   false as ind_selecionado,
                                   b.val_preco_venda,
                                   b.val_custo_medio,
-                                  b.cod_empresa,
+                                  c.cod_empresa,
                                   d.nom_fantasia
                                   from ${schema}.tab_item a
-                                  inner join ${schema}.tab_custo_preco b on (a.cod_item = b.cod_item)
-                                  inner join ${schema}.tab_item_empresa c on (c.cod_item = a.cod_item and c.cod_empresa = b.cod_empresa) 
-                                  inner join ${schema}.tab_empresa_schema d on (c.cod_empresa = d.cod_empresa) 
-                                  where cod_subgrupo in (1) 
-                                  and b.cod_empresa in (${placeholders})
-                                  order by cod_item`,
+                                  inner join ${schema}.tab_item_empresa c on (c.cod_item = a.cod_item and c.cod_empresa in (${placeholders}))
+                                  inner join ${schema}.tab_empresa_schema d on (c.cod_empresa = d.cod_empresa)
+                                  left join ${schema}.tab_custo_preco b on (a.cod_item = b.cod_item and b.cod_empresa = c.cod_empresa)
+                                  where a.cod_subgrupo in (1)
+                                  order by a.cod_item`,
       empresasSelecionadas,
     );
 
@@ -713,13 +787,12 @@ exports.buscaFiltroItem = async (req, res) => {
     );
 
     const itemFull = await db.query_trocaprecos(
-      `select a.cod_item, a.des_item 
+      `select a.cod_item, a.des_item
                                       from ${schema}.tab_item a
-                                      inner join ${schema}.tab_custo_preco b on (a.cod_item = b.cod_item)
-                                      inner join ${schema}.tab_item_empresa c on (c.cod_item = a.cod_item and c.cod_empresa = b.cod_empresa) 
-                                      where a.cod_subgrupo in (1) 
-                                      and b.cod_empresa in (${placeholders})
-                                      group by a.cod_item, a.des_item 
+                                      inner join ${schema}.tab_item_empresa c on (c.cod_item = a.cod_item and c.cod_empresa in (${placeholders}))
+                                      left join ${schema}.tab_custo_preco b on (a.cod_item = b.cod_item and b.cod_empresa = c.cod_empresa)
+                                      where a.cod_subgrupo in (1)
+                                      group by a.cod_item, a.des_item
                                       order by a.cod_item`,
       empresasSelecionadas,
     );
