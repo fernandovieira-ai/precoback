@@ -14,6 +14,12 @@ const isDevelopment = process.env.NODE_ENV !== 'production';
 //=> conexão com a base de dados trocaprecos
 const pool_trocaprecos = new Pool({
   connectionString: process.env.DATABASE_URL_TROCAPRECOS,
+  max: 30,                          // Aumentar de 10 para 30 conexões
+  min: 5,                           // Manter mínimo 5 conexões abertas
+  idleTimeoutMillis: 45000,         // Fechar conexão ociosa após 45s
+  connectionTimeoutMillis: 15000,   // Timeout para obter conexão = 15s
+  statement_timeout: 60000,         // Timeout em queries = 60s
+  allowExitOnIdle: true,
 });
 
 // Tratamento de erros
