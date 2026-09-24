@@ -14,6 +14,10 @@ const isDevelopment = process.env.NODE_ENV !== 'production';
 //=> conexão com a base de dados trocaprecos
 const pool_trocaprecos = new Pool({
   connectionString: process.env.DATABASE_URL_TROCAPRECOS,
+  max: 20, // Aumentar max connections
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 10000,
+  statement_timeout: 30000, // 30 segundos por query
 });
 
 // Tratamento de erros
@@ -37,19 +41,15 @@ const query_trocaprecos = (text, params) => {
     if (params) console.log("📦 Parâmetros:", params);
   }
 
-  return pool_trocaprecos.connect().then((client) => {
-    return client
-      .query(text, params)
-      .then((res) => {
-        client.release();
-        return res;
-      })
-      .catch((err) => {
-        client.release();
-        console.error("❌ Erro na query:", err.stack);
-        throw err;
-      });
-  });
+  return pool_trocaprecos
+    .query(text, params)
+    .then((res) => {
+      return res;
+    })
+    .catch((err) => {
+      console.error("❌ Erro na query:", err.stack);
+      throw err;
+    });
 };
 
 module.exports = {

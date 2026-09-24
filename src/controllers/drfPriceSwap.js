@@ -430,12 +430,17 @@ exports.buscaFiltroPreLoad = async (req, res) => {
     //                      'R' -- charconexaotipo
     //                   ) `)
 
-    const pessoa = await db.query_trocaprecos(
-      `select cod_pessoa, nom_pessoa, coalesce(num_cnpj_cpf, '') as num_cnpj_cpf , cod_regiao_venda, dta_cadastro, false as ind_selecionado from ${schema}.tab_pessoa`,
-    );
-    const regiao = await db.query_trocaprecos(
-      `select cod_regiao_venda, des_regiao_venda, false as ind_selecionado from ${schema}.tab_regiao_venda`,
-    );
+    const [pessoa, regiao, subGrupo] = await Promise.all([
+      db.query_trocaprecos(
+        `select cod_pessoa, nom_pessoa, coalesce(num_cnpj_cpf, '') as num_cnpj_cpf , cod_regiao_venda, dta_cadastro, false as ind_selecionado from ${schema}.tab_pessoa`,
+      ),
+      db.query_trocaprecos(
+        `select cod_regiao_venda, des_regiao_venda, false as ind_selecionado from ${schema}.tab_regiao_venda`,
+      ),
+      db.query_trocaprecos(
+        `select distinct cod_subgrupo, des_subgrupo from ${schema}.tab_item`,
+      ),
+    ]);
     // const item = await db.query_trocaprecos(`select distinct
     //                               a.cod_item,
     //                               a.des_item,
@@ -453,9 +458,6 @@ exports.buscaFiltroPreLoad = async (req, res) => {
     //                               where cod_subgrupo in (1)
     //                               and b.cod_empresa in (${cod_empresa})
     //                               order by cod_item`);
-    const subGrupo = await db.query_trocaprecos(
-      `select distinct cod_subgrupo, des_subgrupo from ${schema}.tab_item`,
-    );
     //const formaPagto = await db.query_trocaprecos(`select distinct cod_forma_pagto, des_forma_pagto, false as ind_selecionado, ind_tipo, false as ind_selecionado_todos from ${schema}.tab_forma_pagto where cod_empresa in (${cod_empresa}) order by cod_forma_pagto`);
     // const itemFull = await db.query_trocaprecos(`select a.cod_item, a.des_item
     //                                   from ${schema}.tab_item a
