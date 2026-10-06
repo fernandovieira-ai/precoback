@@ -36,6 +36,8 @@ router.post("/buscaFiltroPreLoad", drfPriceSwap.buscaFiltroPreLoad);
 
 router.post("/buscaFiltro", drfPriceSwap.buscaFiltro);
 
+router.post("/buscaClientesFiltro", drfPriceSwap.buscaClientesFiltro);
+
 router.post("/atualizaCustoPrecoPorItens", drfPriceSwap.atualizaCustoPrecoPorItens);
 
 router.post("/buscaCustoPrecoItens", drfPriceSwap.buscaCustoPrecoItens);

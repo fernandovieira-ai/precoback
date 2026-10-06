@@ -144,9 +144,13 @@ async function avaliarItensLote(schema, cod_usuario, cod_empresa, seq_lote) {
 // com a correção aplicada na função sincronizaCadastros para usar
 // sp_atualiza_cadastro(param1, param2, param3, param4)
 
-//=> metodo responsavel por listar os usuarios por ID
+//=> metodo responsavel por fazer login (case-insensitive)
+// Aceita usuário em maiúsculo ou minúsculo (SUPORTE, suporte, Suporte)
 exports.fazerLogin = async (req, res) => {
   const { nom_usuario, senha } = req.body;
+
+  // Log para debug - login case-insensitive ativo
+  console.log(`[LOGIN] Tentativa de login: ${nom_usuario} (case-insensitive)`);
 
   const user = await db.query_trocaprecos(
     `
@@ -164,7 +168,7 @@ exports.fazerLogin = async (req, res) => {
     FROM
       tab_usuario
     WHERE
-      LOWER(nom_usuario) = LOWER($1)
+      UPPER(nom_usuario) = UPPER($1)
       AND senha = $2
     AND ind_ativo = 'S'`,
     [nom_usuario, senha],
@@ -634,16 +638,21 @@ exports.buscaFiltro = async (req, res) => {
                                   a.cod_subgrupo,
                                   false as ind_selecionado,
                                   b.val_preco_venda,
+                                  b.val_preco_venda_a,
+                                  b.val_preco_venda_b,
+                                  b.val_preco_venda_c,
+                                  b.val_preco_venda_d,
+                                  b.val_preco_venda_e,
                                   b.val_custo_medio,
-                                  b.cod_empresa,
+                                  c.cod_empresa,
                                   d.nom_fantasia
                                   from ${schema}.tab_item a
-                                  inner join ${schema}.tab_custo_preco b on (a.cod_item = b.cod_item)
-                                  inner join ${schema}.tab_item_empresa c on (c.cod_item = a.cod_item and c.cod_empresa = b.cod_empresa)
+                                  inner join ${schema}.tab_item_empresa c on (c.cod_item = a.cod_item)
                                   inner join ${schema}.tab_empresa_schema d on (c.cod_empresa = d.cod_empresa)
-                                  where cod_subgrupo in (1, 43, 47)
-                                  and b.cod_empresa in (${cod_empresa})
-                                  order by cod_item`);
+                                  left join ${schema}.tab_custo_preco b on (a.cod_item = b.cod_item and b.cod_empresa = c.cod_empresa)
+                                  where a.cod_subgrupo in (1, 43, 47)
+                                  and c.cod_empresa in (${cod_empresa})
+                                  order by a.cod_item`);
     //const subGrupo = await db.query_trocaprecos(`select distinct cod_subgrupo, des_subgrupo from ${schema}.tab_item`);
     const formaPagto = await db.query_trocaprecos(
       `select distinct cod_forma_pagto, des_forma_pagto, false as ind_selecionado, ind_tipo, false as ind_selecionado_todos from ${schema}.tab_forma_pagto where cod_empresa in (${cod_empresa}) order by cod_forma_pagto`,
@@ -691,6 +700,62 @@ exports.buscaFiltro = async (req, res) => {
 };
 
 // Novo endpoint: Busca apenas custos/preços atualizados para itens específicos
+// Novo endpoint: Busca clientes com filtro (sob demanda)
+exports.buscaClientesFiltro = async (req, res) => {
+  const { schema, busca = "", limit = 500 } = req.body;
+
+  // Validar que tem pelo menos 3 caracteres na busca
+  if (!busca || busca.trim().length < 3) {
+    return res.status(400).json({
+      message: "Digite pelo menos 3 caracteres para buscar clientes",
+      clientes: [],
+    });
+  }
+
+  try {
+    const buscaTerm = `%${busca.trim().toLowerCase()}%`;
+
+    const query = `
+      SELECT
+        cod_pessoa,
+        nom_pessoa,
+        COALESCE(num_cnpj_cpf, '') as num_cnpj_cpf,
+        cod_regiao_venda,
+        dta_cadastro,
+        false as ind_selecionado
+      FROM ${schema}.tab_pessoa
+      WHERE
+        LOWER(nom_pessoa) LIKE $1
+        OR num_cnpj_cpf LIKE $2
+        OR CAST(cod_pessoa AS TEXT) LIKE $2
+      ORDER BY nom_pessoa
+      LIMIT $3
+    `;
+
+    const result = await db.query_trocaprecos(query, [
+      buscaTerm,
+      busca.trim(),
+      limit,
+    ]);
+
+    console.log(
+      `[buscaClientesFiltro] Busca: "${busca}" - Encontrados: ${result.rows.length} clientes`,
+    );
+
+    res.status(200).json({
+      message: "Clientes encontrados",
+      clientes: result.rows,
+      total: result.rows.length,
+    });
+  } catch (error) {
+    console.error("[buscaClientesFiltro] ERRO:", error);
+    res.status(500).json({
+      message: "Falha ao buscar clientes: " + error.message,
+      clientes: [],
+    });
+  }
+};
+
 exports.buscaCustoPrecoItens = async (req, res) => {
   let { schema, cod_empresa, itens } = req.body;
 
@@ -709,6 +774,11 @@ exports.buscaCustoPrecoItens = async (req, res) => {
         cod_item,
         cod_empresa,
         val_preco_venda,
+        val_preco_venda_a,
+        val_preco_venda_b,
+        val_preco_venda_c,
+        val_preco_venda_d,
+        val_preco_venda_e,
         val_custo_medio
       FROM ${schema}.tab_custo_preco
       WHERE cod_empresa = $1
@@ -825,23 +895,28 @@ exports.buscaItemBomba = async (req, res) => {
 
     const item = await db.query_trocaprecos(
       `select distinct
-                                        a.cod_item, 
-                                        a.des_item, 
-                                        a.cod_barra, 
-                                        a.cod_subgrupo, 
+                                        a.cod_item,
+                                        a.des_item,
+                                        a.cod_barra,
+                                        a.cod_subgrupo,
                                         false as ind_selecionado,
                                         b.val_preco_venda,
+                                        b.val_preco_venda_a,
+                                        b.val_preco_venda_b,
+                                        b.val_preco_venda_c,
+                                        b.val_preco_venda_d,
+                                        b.val_preco_venda_e,
                                         b.val_custo_medio,
-                                        b.cod_empresa,
+                                        c.cod_empresa,
                                         d.nom_fantasia,
                                         0 as val_novo_preco_venda
                                         from ${schema}.tab_item a
-                                        inner join ${schema}.tab_custo_preco b on (a.cod_item = b.cod_item)
-                                        inner join ${schema}.tab_item_empresa c on (c.cod_item = a.cod_item and c.cod_empresa = b.cod_empresa) 
-                                        inner join ${schema}.tab_empresa_schema d on (c.cod_empresa = d.cod_empresa) 
-                                        where cod_subgrupo in (1) 
-                                        and b.cod_empresa in (${placeholders})
-                                        order by cod_item`,
+                                        inner join ${schema}.tab_item_empresa c on (c.cod_item = a.cod_item)
+                                        inner join ${schema}.tab_empresa_schema d on (c.cod_empresa = d.cod_empresa)
+                                        left join ${schema}.tab_custo_preco b on (a.cod_item = b.cod_item and b.cod_empresa = c.cod_empresa)
+                                        where a.cod_subgrupo in (1)
+                                        and c.cod_empresa in (${placeholders})
+                                        order by a.cod_item`,
       empresasSelecionadas,
     );
 
@@ -894,6 +969,11 @@ exports.buscaFiltroItem = async (req, res) => {
                                   a.cod_subgrupo,
                                   false as ind_selecionado,
                                   b.val_preco_venda,
+                                  b.val_preco_venda_a,
+                                  b.val_preco_venda_b,
+                                  b.val_preco_venda_c,
+                                  b.val_preco_venda_d,
+                                  b.val_preco_venda_e,
                                   b.val_custo_medio,
                                   c.cod_empresa,
                                   d.nom_fantasia
@@ -1015,11 +1095,11 @@ exports.buscaSubgruposPista = async (req, res) => {
 
     for (const empresa of empresas.rows) {
       try {
-        // Query otimizada: JOIN direto entre tab_subgrupo_item, tab_item e tab_item_empresa
-        // Filtra apenas itens que possuem preço cadastrado na empresa selecionada
+        // ✅ Query otimizada: Busca direto de tab_item
+        // Mostra APENAS produtos COM preço cadastrado (INNER JOIN)
         const itensEmpresa = await db.query_trocaprecos(
           `
-          SELECT 
+          SELECT
             b.cod_subgrupo,
             b.des_subgrupo,
             b.cod_item,
@@ -1027,20 +1107,13 @@ exports.buscaSubgruposPista = async (req, res) => {
             b.cod_barra,
             cp.val_preco_venda,
             cp.val_custo_medio
-          FROM zmaisz.tab_subgrupo_item a 
-          INNER JOIN ${schema}.tab_item b ON (a.cod_subgrupo_item = b.cod_subgrupo) 
+          FROM ${schema}.tab_item b
           INNER JOIN ${schema}.tab_item_empresa c ON (c.cod_item = b.cod_item)
-          LEFT JOIN ${schema}.tab_custo_preco cp ON (cp.cod_item = b.cod_item AND cp.cod_empresa = c.cod_empresa)
+          INNER JOIN ${schema}.tab_custo_preco cp ON (cp.cod_item = b.cod_item AND cp.cod_empresa = c.cod_empresa)
           WHERE c.cod_empresa = $1
-            AND LOWER(a.des_modulo) = LOWER($2)
-            AND EXISTS (
-              SELECT 1 FROM ${schema}.tab_custo_preco aa
-              WHERE aa.cod_item = b.cod_item
-              AND aa.cod_empresa = $1
-            )
-          ORDER BY b.des_subgrupo, b.des_item
+          ORDER BY b.cod_subgrupo, b.des_subgrupo, b.des_item
         `,
-          [empresa.cod_empresa, modulo || "pista"],
+          [empresa.cod_empresa],
         );
         // Log dos primeiros itens para debug
         if (itensEmpresa.rows.length > 0) {
@@ -1122,6 +1195,7 @@ exports.buscaSubgruposPista = async (req, res) => {
   }
 };
 
+// ✅ VERSÃO OTIMIZADA - Usa sp_custo_preco_app em LOTE
 exports.atualizarCustosPrecoPista = async (req, res) => {
   const { schema, cod_empresa_sel } = req.body;
 
@@ -1136,32 +1210,83 @@ exports.atualizarCustosPrecoPista = async (req, res) => {
     setImmediate(async () => {
       try {
         const startTime = Date.now();
+        console.log(`[atualizarCustosPrecoPista] 🚀 Iniciando atualização para ${cod_empresa_sel.length} empresa(s)`);
 
-        // Para cada empresa, executa o procedimento para todos os itens
-        for (const empresa of cod_empresa_sel) {
-          // Executa o procedimento para atualizar custos/preços
-          const query = `
-            SELECT ${schema}.sp_custo_preco(${empresa}, a.cod_item, 0) 
-            FROM ${schema}.tab_item a
-          `;
+        // ✅ OTIMIZAÇÃO 1: Buscar todos os itens de uma vez
+        const resultItens = await db.query_trocaprecos(
+          `SELECT DISTINCT cod_item
+           FROM ${schema}.tab_item
+           WHERE cod_subgrupo IN (1, 43, 47)
+           ORDER BY cod_item`
+        );
 
-          await db.query_trocaprecos(query);
+        const todosItens = resultItens.rows.map(r => r.cod_item);
+        console.log(`[atualizarCustosPrecoPista] 📊 ${todosItens.length} itens para atualizar`);
+
+        if (todosItens.length === 0) {
+          console.warn("[atualizarCustosPrecoPista] ⚠️  Nenhum item encontrado para atualizar");
+          return;
         }
+
+        // ✅ OTIMIZAÇÃO 2: Quebrar em lotes se houver muitos itens
+        const TAMANHO_LOTE = 500;
+        const lotes = [];
+        for (let i = 0; i < todosItens.length; i += TAMANHO_LOTE) {
+          lotes.push(todosItens.slice(i, i + TAMANHO_LOTE));
+        }
+
+        console.log(`[atualizarCustosPrecoPista] 📦 Processando ${lotes.length} lote(s) de até ${TAMANHO_LOTE} itens`);
+
+        // ✅ OTIMIZAÇÃO 3: Usar transação e sp_custo_preco_app (batch)
+        await db.query_trocaprecos("BEGIN");
+
+        for (const empresa of cod_empresa_sel) {
+          console.log(`[atualizarCustosPrecoPista] 🏢 Atualizando empresa ${empresa}...`);
+
+          for (let i = 0; i < lotes.length; i++) {
+            const lote = lotes[i];
+            const empresasArray = `ARRAY[${empresa}]`;
+            const itensArray = `ARRAY[${lote.join(",")}]`;
+
+            const query = `SELECT ${schema}.sp_custo_preco_app(${empresasArray}, ${itensArray})`;
+
+            try {
+              await db.query_trocaprecos(query);
+              console.log(`[atualizarCustosPrecoPista] ✅ Empresa ${empresa} - Lote ${i + 1}/${lotes.length} processado (${lote.length} itens)`);
+            } catch (loteError) {
+              console.error(`[atualizarCustosPrecoPista] ❌ Erro no lote ${i + 1}:`, loteError.message);
+              throw loteError;
+            }
+          }
+        }
+
+        await db.query_trocaprecos("COMMIT");
 
         const endTime = Date.now();
         const duration = ((endTime - startTime) / 1000).toFixed(2);
+
+        console.log(`✅ [atualizarCustosPrecoPista] Concluído com sucesso em ${duration}s`);
+        console.log(`   - ${cod_empresa_sel.length} empresa(s) atualizadas`);
+        console.log(`   - ${todosItens.length} itens processados`);
+        console.log(`   - ${lotes.length} lote(s) de até ${TAMANHO_LOTE} itens`);
+
       } catch (bgError) {
-        console.error(
-          "[atualizarCustosPrecoPista] Erro no processamento background:",
-          bgError,
-        );
+        // ✅ OTIMIZAÇÃO 4: Fazer ROLLBACK em caso de erro
+        try {
+          await db.query_trocaprecos("ROLLBACK");
+          console.error("[atualizarCustosPrecoPista] 🔄 ROLLBACK executado devido a erro");
+        } catch (rollbackError) {
+          console.error("[atualizarCustosPrecoPista] ❌ Erro ao fazer ROLLBACK:", rollbackError);
+        }
+
+        console.error("[atualizarCustosPrecoPista] ❌ Erro no processamento background:", bgError);
+        console.error("Stack:", bgError.stack);
       }
     });
   } catch (error) {
-    console.error("[atualizarCustosPrecoPista] ERRO:", error);
+    console.error("[atualizarCustosPrecoPista] ❌ ERRO ao iniciar:", error);
     res.status(500).json({
-      message:
-        "Falha ao iniciar atualização de custos/preços: " + error.message,
+      message: "Falha ao iniciar atualização de custos/preços: " + error.message,
       error: error.message,
     });
   }
@@ -1174,27 +1299,31 @@ exports.buscaPrecosCliente = async (req, res) => {
     await db.query_trocaprecos("BEGIN");
 
     const pessoaNegociacao = await db.query_trocaprecos(`SELECT distinct
-                                                a.cod_item, 
-                                                a.dta_inicio, 
-                                                a.val_preco_venda_a, 
-                                                a.val_preco_venda_b, 
-                                                a.val_preco_venda_c, 
-                                                a.val_preco_venda_d, 
-                                                a.val_preco_venda_e, 
-                                                a.cod_pessoa, 
-                                                a.cod_condicao_pagamento, 
+                                                a.cod_item,
+                                                a.dta_inicio,
+                                                a.val_preco_venda_a,
+                                                a.val_preco_venda_b,
+                                                a.val_preco_venda_c,
+                                                a.val_preco_venda_d,
+                                                a.val_preco_venda_e,
+                                                a.cod_pessoa,
+                                                a.cod_condicao_pagamento,
                                                 c.des_forma_pagto,
                                                 a.dta_inclusao,
                                                 a.ind_tipo_negociacao,
                                                 a.ind_percentual_valor,
                                                 a.ind_tipo_preco_base,
                                                 b.val_custo_medio,
+                                                b.val_preco_venda_a as val_preco_venda_custo_a,
+                                                b.val_preco_venda_b as val_preco_venda_custo_b,
+                                                b.val_preco_venda_c as val_preco_venda_custo_c,
+                                                b.val_preco_venda_d as val_preco_venda_custo_d,
+                                                b.val_preco_venda_e as val_preco_venda_custo_e,
                                                 d.nom_pessoa,
                                                 e.des_item,
-                                                false as ind_adicionado,
-                                                b.val_preco_venda
+                                                false as ind_adicionado
                                               from ${schema}.tab_preco_emsys a
-                                              left join ${schema}.tab_custo_preco b on (a.cod_item = b.cod_item)
+                                              left join ${schema}.tab_custo_preco b on (a.cod_item = b.cod_item and a.cod_empresa = b.cod_empresa)
                                               right join ${schema}.tab_forma_pagto c on (a.cod_condicao_pagamento = c.cod_forma_pagto)
                                               left join ${schema}.tab_pessoa d on (a.cod_pessoa = d.cod_pessoa)
                                               left join ${schema}.tab_item e on (a.cod_item = e.cod_item)
@@ -1217,10 +1346,21 @@ exports.novaNegociacao = async (req, res) => {
     req.body;
 
   try {
+    // Gerar o número do lote antes de retornar
+    const seq_lote = await db.query_trocaprecos(
+      `select nextval('${schema}.gen_lote')`,
+    );
+
+    const seq_lote_alteracao = seq_lote.rows[0].nextval;
+
+    // Retornar resposta imediatamente com o número do lote
     res.status(200).json({
       message: "Negociações Enviadas, consulte Histórico!",
+      seq_lote_alteracao: seq_lote_alteracao,
+      cod_empresa: cod_empresa, // Array de empresas
     });
 
+    // Processar a inserção em background
     novaNegociacaoInsert(
       schema,
       cod_empresa,
@@ -1228,6 +1368,7 @@ exports.novaNegociacao = async (req, res) => {
       cod_usuario,
       cliente,
       itens,
+      seq_lote_alteracao,
     );
   } catch (error) {
     res.status(500).json({
@@ -1243,15 +1384,12 @@ async function novaNegociacaoInsert(
   cod_usuario,
   cliente,
   itens,
+  seq_lote_alteracao,
 ) {
   const total = itens.length * cliente.length; // Corrija o acesso ao tamanho do array
   const batchSize = 100; // Tamanho do lote para chamar geraStatus
   let progresso = 0;
   let empresa = 0;
-
-  const seq_lote = await db.query_trocaprecos(
-    `select nextval('${schema}.gen_lote')`,
-  );
 
   try {
     for (const c of cliente) {
@@ -1259,13 +1397,13 @@ async function novaNegociacaoInsert(
         // Executa a inserção dentro da transação
         await db.query_trocaprecos(
           `INSERT INTO ${schema}.tab_nova_regra ( seq_lote_alteracao,
-            cod_condicao_pagamento, cod_empresa, nom_usuario, cod_usuario, 
+            cod_condicao_pagamento, cod_empresa, nom_usuario, cod_usuario,
             cod_item, cod_pessoa, dta_inclusao, dta_inicio, ind_percentual_valor,
-            ind_tipo_negociacao, ind_tipo_preco_base, val_preco_venda_a, 
-            val_preco_venda_b, val_preco_venda_c, val_preco_venda_d, 
+            ind_tipo_negociacao, ind_tipo_preco_base, val_preco_venda_a,
+            val_preco_venda_b, val_preco_venda_c, val_preco_venda_d,
             val_preco_venda_e, ind_excluido, ind_status, des_observacao
           ) VALUES (
-            ${seq_lote.rows[0].nextval}, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19
+            ${seq_lote_alteracao}, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19
           )`,
           [
             itens[i].cod_condicao_pagamento,
@@ -1286,7 +1424,7 @@ async function novaNegociacaoInsert(
             itens[i].val_preco_venda_e,
             "N",
             "X",
-            `${seq_lote.rows[0].nextval} Inclusao Negociação`,
+            `${seq_lote_alteracao} Inclusao Negociação`,
           ],
         );
 
@@ -1298,7 +1436,7 @@ async function novaNegociacaoInsert(
         if (progresso % batchSize === 0) {
           // Chama geraStatus
           await geraStatus(
-            seq_lote.rows[0].nextval,
+            seq_lote_alteracao,
             total,
             progresso,
             "sem erro",
@@ -1309,7 +1447,7 @@ async function novaNegociacaoInsert(
 
         if (progresso === total) {
           await geraStatus(
-            seq_lote.rows[0].nextval,
+            seq_lote_alteracao,
             total,
             progresso,
             "Concluído e Pendente de Aprovação",
@@ -1321,7 +1459,7 @@ async function novaNegociacaoInsert(
     }
   } catch (error) {
     await geraStatus(
-      seq_lote.rows[0].nextval,
+      seq_lote_alteracao,
       null,
       null,
       error.message,
@@ -2402,27 +2540,31 @@ exports.buscaPrecoIntervalo = async (req, res) => {
 
     const result = await db.query_trocaprecos(
       `SELECT distinct
-                                                a.cod_item, 
-                                                a.dta_inicio, 
-                                                a.val_preco_venda_a, 
-                                                a.val_preco_venda_b, 
-                                                a.val_preco_venda_c, 
-                                                a.val_preco_venda_d, 
-                                                a.val_preco_venda_e, 
-                                                a.cod_pessoa, 
-                                                a.cod_condicao_pagamento, 
+                                                a.cod_item,
+                                                a.dta_inicio,
+                                                a.val_preco_venda_a,
+                                                a.val_preco_venda_b,
+                                                a.val_preco_venda_c,
+                                                a.val_preco_venda_d,
+                                                a.val_preco_venda_e,
+                                                a.cod_pessoa,
+                                                a.cod_condicao_pagamento,
                                                 c.des_forma_pagto,
                                                 a.dta_inclusao,
                                                 a.ind_tipo_negociacao,
                                                 a.ind_percentual_valor,
                                                 a.ind_tipo_preco_base,
                                                 b.val_custo_medio,
+                                                b.val_preco_venda_a as val_preco_venda_custo_a,
+                                                b.val_preco_venda_b as val_preco_venda_custo_b,
+                                                b.val_preco_venda_c as val_preco_venda_custo_c,
+                                                b.val_preco_venda_d as val_preco_venda_custo_d,
+                                                b.val_preco_venda_e as val_preco_venda_custo_e,
                                                 d.nom_pessoa,
                                                 e.des_item,
-                                                false as ind_adicionado,
-                                                b.val_preco_venda
+                                                false as ind_adicionado
                                               from ${schema}.tab_preco_emsys a
-                                              left join ${schema}.tab_custo_preco b on (a.cod_item = b.cod_item)
+                                              left join ${schema}.tab_custo_preco b on (a.cod_item = b.cod_item and a.cod_empresa = b.cod_empresa)
                                               right join ${schema}.tab_forma_pagto c on (a.cod_condicao_pagamento = c.cod_forma_pagto)
                                               left join ${schema}.tab_pessoa d on (a.cod_pessoa = d.cod_pessoa)
                                               left join ${schema}.tab_item e on (a.cod_item = e.cod_item)
@@ -2455,6 +2597,8 @@ exports.buscaPrecoEmsys = async (req, res) => {
     codFormaPagto,
     tipoNegociacao,
     precoMenorQue,
+    page = 1,        // 👈 NOVO: Paginação (opcional, default página 1)
+    pageSize = 100,  // 👈 NOVO: Registros por página (opcional, default 100)
   } = req.body;
 
   console.log("=== buscaPrecoEmsys - Parâmetros recebidos ===");
@@ -2472,6 +2616,7 @@ exports.buscaPrecoEmsys = async (req, res) => {
     tipoNegociacao?.length,
   );
   console.log("Preço Menor Que:", precoMenorQue);
+  console.log("Paginação:", { page, pageSize });
 
   // Validar se pelo menos uma empresa foi selecionada
   if (!codEmpresa || codEmpresa.length === 0) {
@@ -2516,6 +2661,10 @@ exports.buscaPrecoEmsys = async (req, res) => {
     // PASSO 2: Buscar os dados da tabela com os JOINs
     console.log("=== PASSO 2: Buscando dados com JOINs ===");
 
+    // Calcular paginação
+    const offset = (page - 1) * pageSize;
+    console.log(`Buscando página ${page} (LIMIT ${pageSize} OFFSET ${offset})`);
+
     const querySelect = `
       SELECT DISTINCT ON (a.id_preco, a.seq_preco, a.cod_empresa, a.cod_pessoa, a.cod_item, a.cod_condicao_pagamento)
         e.cod_empresa,
@@ -2550,17 +2699,18 @@ exports.buscaPrecoEmsys = async (req, res) => {
         a.nom_usuario_replicacao,
         a.dta_replicacao,
         a.hra_replicacao
-      FROM ${schema}.tab_preco_emsys a 
-      INNER JOIN ${schema}.tab_pessoa b ON (a.cod_pessoa = b.cod_pessoa) 
-      INNER JOIN ${schema}.tab_item c ON (c.cod_item = a.cod_item) 
-      INNER JOIN ${schema}.tab_forma_pagto d ON (d.cod_forma_pagto = a.cod_condicao_pagamento) 
-      INNER JOIN ${schema}.tab_empresa_schema e ON (e.cod_empresa = a.cod_empresa AND d.cod_empresa = e.cod_empresa) 
+      FROM ${schema}.tab_preco_emsys a
+      INNER JOIN ${schema}.tab_pessoa b ON (a.cod_pessoa = b.cod_pessoa)
+      INNER JOIN ${schema}.tab_item c ON (c.cod_item = a.cod_item)
+      INNER JOIN ${schema}.tab_forma_pagto d ON (d.cod_forma_pagto = a.cod_condicao_pagamento)
+      INNER JOIN ${schema}.tab_empresa_schema e ON (e.cod_empresa = a.cod_empresa AND d.cod_empresa = e.cod_empresa)
       LEFT JOIN ${schema}.tab_custo_preco f ON (f.cod_empresa = a.cod_empresa AND f.cod_item = a.cod_item)
       ORDER BY a.id_preco, a.seq_preco, a.cod_empresa, a.cod_pessoa, a.cod_item, a.cod_condicao_pagamento, e.nom_fantasia, b.nom_pessoa, c.des_item, d.ind_tipo, d.des_forma_pagto
+      LIMIT $1 OFFSET $2
     `;
 
     console.log("Query Select:", querySelect);
-    const result = await db.query_trocaprecos(querySelect);
+    const result = await db.query_trocaprecos(querySelect, [pageSize, offset]);
 
     console.log(`=== Resultados encontrados: ${result.rows.length} ===`);
     if (result.rows.length > 0) {
@@ -2571,6 +2721,12 @@ exports.buscaPrecoEmsys = async (req, res) => {
 
     res.status(200).json({
       message: result.rows,
+      pagination: {
+        page: page,
+        pageSize: pageSize,
+        totalRetornado: result.rows.length,
+        hasMore: result.rows.length === pageSize,
+      },
     });
   } catch (error) {
     console.error("=== ERRO em buscaPrecoEmsys ===");
