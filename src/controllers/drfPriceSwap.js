@@ -140,6 +140,22 @@ async function avaliarItensLote(schema, cod_usuario, cod_empresa, seq_lote) {
   return { totalItens: result.rows.length, liberados, bloqueados };
 }
 
+/**
+ * Confirma que cod_usuario_admin é, de fato, um administrador ATIVO
+ * (tbl_admin_perfis) antes de permitir conceder/revogar acesso de outra
+ * pessoa. Sem essa checagem, qualquer chamada direta à API (sem passar
+ * pela tela/senha) poderia se autopromover a admin só informando um
+ * cod_usuario_admin arbitrário no corpo da requisição.
+ */
+async function ehAdminAtivo(schema, cod_usuario_admin) {
+  if (!cod_usuario_admin) return false;
+  const result = await db.query_trocaprecos(
+    `SELECT 1 FROM ${schema}.tbl_admin_perfis WHERE cod_usuario = $1 AND ind_ativo = 'S'`,
+    [cod_usuario_admin],
+  );
+  return result.rows.length > 0;
+}
+
 // NOTA IMPORTANTE: Este arquivo foi copiado do projeto original
 // com a correção aplicada na função sincronizaCadastros para usar
 // sp_atualiza_cadastro(param1, param2, param3, param4)
@@ -2529,6 +2545,113 @@ exports.historicoConfigGrupo = async (req, res) => {
     res.status(200).json({ message: result.rows });
   } catch (error) {
     res.status(500).json({ message: "Falha ao buscar histórico: " + error });
+  }
+};
+
+// ----------------------------------------------------------------------------
+// Administradores do sistema (quem tem acesso à tela de autonomia)
+// ----------------------------------------------------------------------------
+
+//=> Lista quem tem acesso à tela de administração (tbl_admin_perfis).
+exports.listarAdminsAutonomia = async (req, res) => {
+  const { schema } = req.body;
+
+  try {
+    const result = await db.query_trocaprecos(
+      `SELECT cod_usuario, nom_usuario, ind_ativo, dta_cadastro,
+              dta_ultimo_acesso, qtd_acessos
+         FROM ${schema}.tbl_admin_perfis
+        WHERE ind_ativo = 'S'
+        ORDER BY nom_usuario`,
+    );
+
+    res.status(200).json({ message: result.rows });
+  } catch (error) {
+    res.status(500).json({ message: "Falha ao listar administradores: " + error });
+  }
+};
+
+//=> Busca usuário ATIVO (já sincronizado do EMSys3) por nome, para achar o
+// cod_usuario de quem vai virar administrador — nunca cria usuário novo.
+exports.buscarUsuarioParaAdmin = async (req, res) => {
+  const { schema, busca } = req.body;
+
+  if (!busca || !busca.trim()) {
+    return res.status(200).json({ message: [] });
+  }
+
+  try {
+    const result = await db.query_trocaprecos(
+      `SELECT cod_usuario, nom_usuario
+         FROM ${schema}.tab_usuario
+        WHERE ind_ativo = 'S' AND nom_usuario ILIKE $1
+        ORDER BY nom_usuario
+        LIMIT 20`,
+      [`%${busca.trim()}%`],
+    );
+
+    res.status(200).json({ message: result.rows });
+  } catch (error) {
+    res.status(500).json({ message: "Falha ao buscar usuário: " + error });
+  }
+};
+
+//=> Concede acesso de administrador a um usuário já existente.
+exports.adicionarAdminAutonomia = async (req, res) => {
+  const { schema, cod_usuario, nom_usuario, cod_usuario_admin } = req.body;
+
+  if (!cod_usuario || !nom_usuario) {
+    return res.status(400).json({ message: "Usuário inválido." });
+  }
+
+  try {
+    if (!(await ehAdminAtivo(schema, cod_usuario_admin))) {
+      return res.status(403).json({ message: "Apenas administradores podem conceder esse acesso." });
+    }
+
+    await db.query_trocaprecos(
+      `INSERT INTO ${schema}.tbl_admin_perfis (cod_usuario, nom_usuario, ind_ativo)
+       VALUES ($1, $2, 'S')
+       ON CONFLICT (cod_usuario) DO UPDATE SET
+         nom_usuario = EXCLUDED.nom_usuario,
+         ind_ativo = 'S'`,
+      [cod_usuario, nom_usuario],
+    );
+
+    res.status(200).json({ message: `${nom_usuario} agora tem acesso de administrador.` });
+  } catch (error) {
+    res.status(500).json({ message: "Falha ao adicionar administrador: " + error });
+  }
+};
+
+//=> Revoga acesso de administrador (soft: ind_ativo='N', preserva histórico).
+// Bloqueia remover o último admin ativo, pra não trancar o acesso de todos.
+exports.removerAdminAutonomia = async (req, res) => {
+  const { schema, cod_usuario, cod_usuario_admin } = req.body;
+
+  try {
+    if (!(await ehAdminAtivo(schema, cod_usuario_admin))) {
+      return res.status(403).json({ message: "Apenas administradores podem revogar esse acesso." });
+    }
+
+    const ativos = await db.query_trocaprecos(
+      `SELECT COUNT(*) AS total FROM ${schema}.tbl_admin_perfis WHERE ind_ativo = 'S'`,
+    );
+
+    if (Number(ativos.rows[0].total) <= 1) {
+      return res.status(400).json({
+        message: "Não é possível remover o último administrador ativo.",
+      });
+    }
+
+    await db.query_trocaprecos(
+      `UPDATE ${schema}.tbl_admin_perfis SET ind_ativo = 'N' WHERE cod_usuario = $1`,
+      [cod_usuario],
+    );
+
+    res.status(200).json({ message: "Acesso de administrador removido." });
+  } catch (error) {
+    res.status(500).json({ message: "Falha ao remover administrador: " + error });
   }
 };
 
