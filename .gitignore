@@ -1,4 +1,9 @@
 node_modules/
 .env
+.env.local
 *.log
 .DS_Store
+
+# Base local de testes (cópia de produção — nunca subir dados reais)
+local-db/dumps/
+local-db/.env

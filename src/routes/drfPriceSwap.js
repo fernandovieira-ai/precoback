@@ -81,6 +81,32 @@ router.post("/aprovaRegra", drfPriceSwap.aprovaRegra);
 
 router.post("/reprovaRegra", drfPriceSwap.reprovaRegra);
 
+//=> Sistema de Autonomia de Descontos
+router.post("/validarAutonomiaAprovacao", drfPriceSwap.validarAutonomiaAprovacao);
+
+router.post("/solicitarAprovacaoSuperior", drfPriceSwap.solicitarAprovacaoSuperior);
+
+router.post("/listarPendentesAprovacaoSuperior", drfPriceSwap.listarPendentesAprovacaoSuperior);
+
+//=> Parâmetro geral (kill switch)
+router.post("/buscarParametroAutonomia", drfPriceSwap.buscarParametroAutonomia);
+
+router.post("/atualizarParametroAutonomia", drfPriceSwap.atualizarParametroAutonomia);
+
+//=> Administração de Perfis por GRUPO (tela protegida por senha admin)
+router.post("/validarSenhaAdmin", drfPriceSwap.validarSenhaAdmin);
+
+router.post("/listarGruposAutonomia", drfPriceSwap.listarGruposAutonomia);
+
+router.post("/listarUsuariosGrupo", drfPriceSwap.listarUsuariosGrupo);
+router.post("/buscarUsuarioGrupo", drfPriceSwap.buscarUsuarioGrupo);
+
+router.post("/atualizarPerfilGrupo", drfPriceSwap.atualizarPerfilGrupo);
+
+router.post("/desativarPerfilGrupo", drfPriceSwap.desativarPerfilGrupo);
+
+router.post("/historicoConfigGrupo", drfPriceSwap.historicoConfigGrupo);
+
 router.post("/buscaPrecoIntervalo", drfPriceSwap.buscaPrecoIntervalo);
 
 router.post("/buscaPrecoEmsys", drfPriceSwap.buscaPrecoEmsys);

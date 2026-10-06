@@ -15,6 +15,131 @@ const { Console } = require("console");
 const nodemailer = require("nodemailer");
 const PDFDocument = require("pdfkit");
 
+/**
+ * Busca a menor margem (preço negociado - custo médio) entre os itens de um
+ * lote/empresa e valida se o usuário tem autonomia para aprovar essa margem.
+ * Usa o "piores caso" (MIN) do lote como critério conservador.
+ */
+async function sistemaAutonomiaAtivo(schema) {
+  const result = await db.query_trocaprecos(
+    `SELECT ind_ativo FROM ${schema}.tbl_parametro_autonomia WHERE cod_parametro = 1`,
+  );
+  return result.rows[0]?.ind_ativo === "S";
+}
+
+async function validarAutonomia(schema, cod_usuario, cod_empresa, seq_lote) {
+  const margemResult = await db.query_trocaprecos(
+    `SELECT MIN(val_margem) AS margem_minima
+       FROM ${schema}.vw_negociacao_margem
+      WHERE seq_lote_alteracao = $1
+        AND cod_empresa = $2`,
+    [seq_lote, cod_empresa],
+  );
+
+  const margemBruta = margemResult.rows[0]?.margem_minima;
+
+  if (margemBruta === null || margemBruta === undefined) {
+    return {
+      pode_aprovar: false,
+      perfil: "sem_dados",
+      margem_autonomia: null,
+      margem_negociacao: null,
+      motivo: "Não foi possível calcular a margem deste lote (custo não encontrado).",
+    };
+  }
+
+  // val_preco_venda/val_custo_medio são float8: a subtração entre eles gera
+  // ruído de ponto flutuante (ex: 0.08650999999999964 em vez de 0.09).
+  // Arredonda para centavos ANTES de comparar com a autonomia configurada —
+  // senão a regra nunca bate exatamente com o valor mostrado na tela.
+  const margemMinima = Math.round(margemBruta * 100) / 100;
+
+  const validacao = await db.query_trocaprecos(
+    `SELECT * FROM ${schema}.fn_validar_autonomia_aprovacao($1, $2, $3)`,
+    [cod_usuario, margemMinima, cod_empresa],
+  );
+
+  const row = validacao.rows[0];
+
+  return {
+    pode_aprovar: row.pode_aprovar,
+    perfil: row.perfil,
+    // NUMERIC do Postgres volta como string no driver pg (para não perder
+    // precisão) — o frontend chama .toFixed() direto nesses campos, então
+    // aqui garantimos number sempre, senão .toFixed() quebra em silêncio
+    // (promise rejeitada sem tratamento, o alerta nunca chega a aparecer).
+    margem_autonomia: row.margem_autonomia !== null ? Number(row.margem_autonomia) : null,
+    margem_negociacao: margemMinima !== null && margemMinima !== undefined ? Number(margemMinima) : null,
+    motivo: row.motivo,
+  };
+}
+
+/**
+ * Avalia a autonomia ITEM A ITEM (cliente a cliente) dentro de um lote, em
+ * vez de usar só a pior margem do lote inteiro. Um lote pode ter descontos
+ * distintos por cliente/produto — se um item está dentro da autonomia e
+ * outro não, só o segundo deve ficar pendente; o primeiro pode ser
+ * aprovado normalmente.
+ */
+async function avaliarItensLote(schema, cod_usuario, cod_empresa, seq_lote) {
+  const result = await db.query_trocaprecos(
+    `SELECT v.seq_registro, v.cod_item, v.val_margem,
+            f.pode_aprovar, f.perfil, f.margem_autonomia, f.motivo
+       FROM ${schema}.vw_negociacao_margem v
+       LEFT JOIN LATERAL (
+         SELECT * FROM ${schema}.fn_validar_autonomia_aprovacao(
+           $1, ROUND(v.val_margem::numeric, 2), v.cod_empresa
+         )
+         WHERE v.val_margem IS NOT NULL
+       ) f ON TRUE
+      WHERE v.seq_lote_alteracao = $2
+        AND v.cod_empresa = $3
+        AND v.ind_status = 'X'`,
+    [cod_usuario, seq_lote, cod_empresa],
+  );
+
+  const liberados = [];
+  const bloqueados = [];
+
+  for (const item of result.rows) {
+    const margem = item.val_margem !== null ? Math.round(item.val_margem * 100) / 100 : null;
+
+    if (margem === null) {
+      bloqueados.push({
+        seq_registro: item.seq_registro,
+        cod_item: item.cod_item,
+        margem: null,
+        perfil: "sem_dados",
+        margem_autonomia: null,
+        motivo: "Custo não encontrado para este item.",
+      });
+      continue;
+    }
+
+    // 'sem_perfil' = nem grupo nem sistema restringem esse item -> legado.
+    if (item.perfil === "sem_perfil" || item.pode_aprovar) {
+      liberados.push({
+        seq_registro: item.seq_registro,
+        cod_item: item.cod_item,
+        margem,
+        perfil: item.perfil,
+        margem_autonomia: item.margem_autonomia !== null ? Number(item.margem_autonomia) : null,
+      });
+    } else {
+      bloqueados.push({
+        seq_registro: item.seq_registro,
+        cod_item: item.cod_item,
+        margem,
+        perfil: item.perfil,
+        margem_autonomia: item.margem_autonomia !== null ? Number(item.margem_autonomia) : null,
+        motivo: item.motivo,
+      });
+    }
+  }
+
+  return { totalItens: result.rows.length, liberados, bloqueados };
+}
+
 // NOTA IMPORTANTE: Este arquivo foi copiado do projeto original
 // com a correção aplicada na função sincronizaCadastros para usar
 // sp_atualiza_cadastro(param1, param2, param3, param4)
@@ -39,7 +164,7 @@ exports.fazerLogin = async (req, res) => {
     FROM
       tab_usuario
     WHERE
-      nom_usuario = $1
+      LOWER(nom_usuario) = LOWER($1)
       AND senha = $2
     AND ind_ativo = 'S'`,
     [nom_usuario, senha],
@@ -1344,6 +1469,7 @@ exports.buscaMinhasNegociacoesDetalhe = async (req, res) => {
                                                   left join ${schema}.tab_custo_preco e on (e.cod_item = a.cod_item and e.cod_empresa = a.cod_empresa)
                                                   where a.seq_lote_alteracao = $1
                                                   and a.cod_empresa in (${cod_empresa})
+                                                  and a.ind_status = 'X'
                                                   order by b.nom_pessoa, d.des_item`,
         [seq_lote_alteracao],
       );
@@ -1669,27 +1795,71 @@ exports.enviaTrocaPreco = async (req, res) => {
 };
 
 exports.aprovaRegra = async (req, res) => {
-  const { schema, cod_empresa, nom_usuario, seq_lote } = req.body;
+  const { schema, cod_empresa, nom_usuario, cod_usuario, seq_lote } = req.body;
   try {
+    // Validação de autonomia: só entra em vigor se o parâmetro geral estiver
+    // ativado. Analisa ITEM A ITEM (não o lote inteiro) — um lote pode ter
+    // vários descontos, cada um com sua própria margem; só os itens fora
+    // da autonomia ficam pendentes, os demais são aprovados normalmente.
+    let itensBloqueados = [];
+    let idsLiberados = null; // null = sem restrição (sistema off ou sem cod_usuario)
+
+    if (cod_usuario && (await sistemaAutonomiaAtivo(schema))) {
+      const avaliacao = await avaliarItensLote(schema, cod_usuario, cod_empresa, seq_lote);
+      idsLiberados = avaliacao.liberados.map((i) => i.seq_registro);
+      itensBloqueados = avaliacao.bloqueados;
+    }
+
     await db.query_trocaprecos("BEGIN");
 
-    await db.query_trocaprecos(
-      `update ${schema}.tab_nova_regra
-                    set ind_status = 'T',
-                        usuario_aprovacao = $2
+    if (idsLiberados !== null) {
+      // Aprovação seletiva: só os itens dentro da autonomia mudam de status.
+      if (idsLiberados.length > 0) {
+        await db.query_trocaprecos(
+          `update ${schema}.tab_nova_regra
+                        set ind_status = 'T',
+                            usuario_aprovacao = $2
+                      where seq_registro = ANY($1)`,
+          [idsLiberados, nom_usuario],
+        );
+      }
+    } else {
+      // Sistema de autonomia não se aplica: aprova o lote inteiro (legado).
+      await db.query_trocaprecos(
+        `update ${schema}.tab_nova_regra
+                      set ind_status = 'T',
+                          usuario_aprovacao = $2
                     where cod_empresa in ($3)
                     and seq_lote_alteracao = $1`,
-      [seq_lote, nom_usuario, cod_empresa],
-    );
+        [seq_lote, nom_usuario, cod_empresa],
+      );
+    }
 
     await db.query_trocaprecos(
       `update ${schema}.tab_progresso_lote
-                    set error = 'Aprovado'
+                    set error = $2
                     where seq_lote = $1`,
-      [seq_lote],
+      [
+        seq_lote,
+        itensBloqueados.length > 0
+          ? `Aprovado parcialmente (${itensBloqueados.length} item(ns) pendente(s) de aprovação superior)`
+          : "Aprovado",
+      ],
     );
 
     await db.query_trocaprecos("COMMIT");
+
+    if (itensBloqueados.length > 0) {
+      const qtdLiberados = idsLiberados?.length || 0;
+      return res.status(200).json({
+        message:
+          qtdLiberados > 0
+            ? `${qtdLiberados} item(ns) aprovado(s). ${itensBloqueados.length} item(ns) fora da sua autonomia continuam pendentes.`
+            : `Nenhum item foi aprovado: os ${itensBloqueados.length} item(ns) deste lote estão fora da sua autonomia.`,
+        parcial: true,
+        itens_bloqueados: itensBloqueados,
+      });
+    }
 
     res.status(200).json({
       message: "Negociações Aprovadas com Sucesso.",
@@ -1707,10 +1877,15 @@ exports.reprovaRegra = async (req, res) => {
   try {
     await db.query_trocaprecos("BEGIN");
 
+    // Só reprova o que ainda está pendente (ind_status='X'). Com a
+    // aprovação parcial por item, um lote pode ter itens já aprovados
+    // ('T') convivendo com itens pendentes no mesmo seq_lote — sem esse
+    // filtro, reprovar excluiria também os itens já aprovados.
     await db.query_trocaprecos(
       `update ${schema}.tab_nova_regra
                     set ind_excluido = 'S'
-                    where seq_lote_alteracao = $1`,
+                    where seq_lote_alteracao = $1
+                    and ind_status = 'X'`,
       [seq_lote],
     );
 
@@ -1731,6 +1906,491 @@ exports.reprovaRegra = async (req, res) => {
     res.status(500).json({
       message: "Falha em reprovar negociação:" + error,
     });
+  }
+};
+
+// ============================================================================
+// SISTEMA DE AUTONOMIA DE DESCONTOS
+// ============================================================================
+
+//=> Consulta se o usuário tem autonomia para aprovar um lote, sem aprovar.
+// Usado pelo frontend para decidir entre "Aprovar Diretamente" ou
+// "Solicitar Aprovação Superior" antes de chamar /aprovaRegra.
+exports.validarAutonomiaAprovacao = async (req, res) => {
+  const { schema, cod_usuario, cod_empresa, seq_lote } = req.body;
+
+  const respostaLegado = {
+    pode_aprovar: true,
+    perfil: "legado",
+    margem_autonomia: null,
+    margem_negociacao: null,
+    motivo: null,
+    sistema_autonomia_ativo: false,
+    qtd_total: 0,
+    qtd_liberados: 0,
+    qtd_bloqueados: 0,
+    itens_bloqueados: [],
+  };
+
+  try {
+    if (!(await sistemaAutonomiaAtivo(schema))) {
+      return res.status(200).json(respostaLegado);
+    }
+
+    // Analisa ITEM A ITEM: um lote pode ter vários descontos com margens
+    // diferentes, cada um avaliado contra a autonomia do usuário.
+    const avaliacao = await avaliarItensLote(schema, cod_usuario, cod_empresa, seq_lote);
+
+    if (avaliacao.totalItens === 0 || avaliacao.bloqueados.length === 0) {
+      // Nada bloqueado (ou nenhum item pendente encontrado): libera geral.
+      return res.status(200).json({
+        ...respostaLegado,
+        pode_aprovar: true,
+        sistema_autonomia_ativo: avaliacao.totalItens > 0,
+        qtd_total: avaliacao.totalItens,
+        qtd_liberados: avaliacao.liberados.length,
+      });
+    }
+
+    // Pega o item mais restritivo entre os bloqueados só para exibir um
+    // resumo no alerta (margem/autonomia/motivo "pior caso"). Item sem
+    // custo/margem calculável (margem null) é tratado como o mais grave.
+    const pior = avaliacao.bloqueados.reduce((a, b) => {
+      if (a.margem === null) return a;
+      if (b.margem === null) return b;
+      return a.margem <= b.margem ? a : b;
+    });
+
+    res.status(200).json({
+      pode_aprovar: false,
+      perfil: pior.perfil,
+      margem_autonomia: pior.margem_autonomia,
+      margem_negociacao: pior.margem,
+      motivo: pior.motivo,
+      sistema_autonomia_ativo: true,
+      qtd_total: avaliacao.totalItens,
+      qtd_liberados: avaliacao.liberados.length,
+      qtd_bloqueados: avaliacao.bloqueados.length,
+      itens_bloqueados: avaliacao.bloqueados,
+    });
+  } catch (error) {
+    res.status(500).json({
+      message: "Falha ao validar autonomia: " + error,
+    });
+  }
+};
+
+//=> Registra a solicitação de aprovação superior (quando falta autonomia).
+// Não aprova nada — apenas deixa um registro de PENDENTE para o supervisor
+// ou diretor decidir depois (via aprovaRegra normal, que fará a checagem de
+// autonomia novamente para o cod_usuario que efetivamente aprovar).
+exports.solicitarAprovacaoSuperior = async (req, res) => {
+  const {
+    schema,
+    cod_empresa,
+    seq_lote,
+    cod_usuario_solicitante,
+    nom_usuario_solicitante,
+    des_observacao,
+  } = req.body;
+
+  try {
+    const autonomia = await validarAutonomia(
+      schema,
+      cod_usuario_solicitante,
+      cod_empresa,
+      seq_lote,
+    );
+
+    await db.query_trocaprecos(
+      `INSERT INTO ${schema}.tbl_historico_aprovacao_negociacao (
+         seq_lote_alteracao, cod_empresa, cod_usuario_solicitante,
+         nom_usuario_solicitante, val_margem_negociacao,
+         ind_perfil_necessario, ind_status, des_observacao
+       ) VALUES ($1, $2, $3, $4, $5, $6, 'PENDENTE', $7)`,
+      [
+        seq_lote,
+        cod_empresa,
+        cod_usuario_solicitante,
+        nom_usuario_solicitante,
+        autonomia.margem_negociacao,
+        autonomia.perfil,
+        des_observacao || null,
+      ],
+    );
+
+    res.status(200).json({
+      message: "Solicitação de aprovação enviada.",
+    });
+  } catch (error) {
+    res.status(500).json({
+      message: "Falha ao solicitar aprovação: " + error,
+    });
+  }
+};
+
+//=> Lista solicitações pendentes de aprovação superior (para supervisores/diretores)
+exports.listarPendentesAprovacaoSuperior = async (req, res) => {
+  const { schema } = req.body;
+
+  try {
+    const result = await db.query_trocaprecos(
+      `SELECT h.seq_historico, h.seq_lote_alteracao, h.cod_empresa,
+              h.nom_usuario_solicitante, h.val_margem_negociacao,
+              h.ind_perfil_necessario, h.des_observacao, h.dta_solicitacao,
+              e.nom_fantasia
+         FROM ${schema}.tbl_historico_aprovacao_negociacao h
+         LEFT JOIN ${schema}.tab_empresa_schema e ON e.cod_empresa = h.cod_empresa
+        WHERE h.ind_status = 'PENDENTE'
+        ORDER BY h.dta_solicitacao ASC`,
+    );
+
+    res.status(200).json({ message: result.rows });
+  } catch (error) {
+    res.status(500).json({
+      message: "Falha ao listar pendentes: " + error,
+    });
+  }
+};
+
+// ----------------------------------------------------------------------------
+// Parâmetro geral (kill switch) — liga/desliga toda a regra de autonomia
+// ----------------------------------------------------------------------------
+
+//=> Consulta se o sistema de autonomia está ativo (usado pela tela de
+// aprovação para decidir se mostra os badges de margem, e pela tela admin
+// para mostrar o estado do interruptor geral).
+exports.buscarParametroAutonomia = async (req, res) => {
+  const { schema } = req.body;
+
+  try {
+    const result = await db.query_trocaprecos(
+      `SELECT ind_ativo, dta_alteracao, nom_usuario_alteracao, des_justificativa
+         FROM ${schema}.tbl_parametro_autonomia WHERE cod_parametro = 1`,
+    );
+
+    res.status(200).json({
+      ativo: result.rows[0]?.ind_ativo === "S",
+      ...result.rows[0],
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Falha ao buscar parâmetro: " + error });
+  }
+};
+
+//=> Liga/desliga o sistema de autonomia por completo. Requer autenticação
+// admin (validada no frontend antes de chamar) e justificativa obrigatória.
+exports.atualizarParametroAutonomia = async (req, res) => {
+  const { schema, ativo, cod_usuario_admin, nom_usuario_admin, des_justificativa } = req.body;
+
+  if (!des_justificativa || !des_justificativa.trim()) {
+    return res.status(400).json({ message: "Justificativa é obrigatória." });
+  }
+
+  try {
+    await db.query_trocaprecos(
+      `UPDATE ${schema}.tbl_parametro_autonomia
+          SET ind_ativo = $1, cod_usuario_alteracao = $2,
+              nom_usuario_alteracao = $3, des_justificativa = $4, dta_alteracao = NOW()
+        WHERE cod_parametro = 1`,
+      [ativo ? "S" : "N", cod_usuario_admin, nom_usuario_admin, des_justificativa],
+    );
+
+    res.status(200).json({
+      message: ativo
+        ? "Sistema de autonomia ATIVADO."
+        : "Sistema de autonomia DESATIVADO (voltou ao comportamento legado).",
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Falha ao atualizar parâmetro: " + error });
+  }
+};
+
+// ----------------------------------------------------------------------------
+// Administração de perfis (tela protegida por senha extra)
+// ----------------------------------------------------------------------------
+
+//=> Valida a senha de administrador para liberar a tela de configuração.
+// Não existe senha separada: reusa a MESMA senha de login que o usuário já
+// tem em tab_usuario (o frontend envia o MD5, exatamente como faz no login
+// normal). tbl_admin_perfis é só a lista de quem tem essa permissão.
+exports.validarSenhaAdmin = async (req, res) => {
+  const { schema, cod_usuario, senha_admin } = req.body;
+
+  try {
+    const result = await db.query_trocaprecos(
+      `SELECT a.cod_usuario, a.nom_usuario
+         FROM ${schema}.tbl_admin_perfis a
+         JOIN ${schema}.tab_usuario u ON u.cod_usuario = a.cod_usuario
+        WHERE a.cod_usuario = $1 AND a.ind_ativo = 'S' AND u.senha = $2`,
+      [cod_usuario, senha_admin],
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(200).json({
+        sucesso: false,
+        mensagem: "Você não tem permissão de administrador ou a senha está incorreta.",
+      });
+    }
+
+    const admin = result.rows[0];
+
+    await db.query_trocaprecos(
+      `UPDATE ${schema}.tbl_admin_perfis
+          SET dta_ultimo_acesso = NOW(), qtd_acessos = qtd_acessos + 1
+        WHERE cod_usuario = $1`,
+      [cod_usuario],
+    );
+
+    res.status(200).json({
+      sucesso: true,
+      admin: { cod_usuario: admin.cod_usuario, nom_usuario: admin.nom_usuario },
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Falha ao validar senha admin: " + error });
+  }
+};
+
+//=> Lista os grupos do EMSys3 (sincronizados por sp_atualiza_usuario),
+// indicando se já têm perfil de autonomia configurado e quantos usuários
+// ativos pertencem a cada grupo. Configurar aqui aplica a margem para TODOS
+// os usuários daquele grupo de uma vez — muito mais viável que configurar
+// usuário por usuário quando há centenas deles.
+exports.listarGruposAutonomia = async (req, res) => {
+  const { schema } = req.body;
+
+  try {
+    const result = await db.query_trocaprecos(
+      `SELECT g.cod_grupo, g.des_grupo,
+              COUNT(DISTINCT ug.cod_usuario) AS qtd_usuarios,
+              p.ind_perfil_aprovacao, p.val_margem_minima_autonomia,
+              p.ind_ativo AS perfil_ativo, p.dta_alteracao,
+              p.nom_usuario_alteracao
+         FROM ${schema}.tab_grupo_usuario g
+         LEFT JOIN ${schema}.tab_usuario_grupo ug ON ug.cod_grupo = g.cod_grupo
+         LEFT JOIN ${schema}.tbl_grupo_perfil_aprovacao p ON p.cod_grupo = g.cod_grupo
+        GROUP BY g.cod_grupo, g.des_grupo, p.cod_grupo, p.ind_perfil_aprovacao,
+                 p.val_margem_minima_autonomia, p.ind_ativo, p.dta_alteracao,
+                 p.nom_usuario_alteracao
+        ORDER BY (p.cod_grupo IS NOT NULL) DESC, qtd_usuarios DESC`,
+    );
+
+    res.status(200).json({ message: result.rows });
+  } catch (error) {
+    res.status(500).json({ message: "Falha ao listar grupos: " + error });
+  }
+};
+
+//=> Lista os usuários ativos vinculados a um grupo específico — usado para
+// a tela de administração permitir "abrir" um grupo e conferir quem
+// exatamente vai herdar a margem configurada, antes de salvar.
+exports.listarUsuariosGrupo = async (req, res) => {
+  const { schema, cod_grupo } = req.body;
+
+  try {
+    const result = await db.query_trocaprecos(
+      `SELECT u.cod_usuario, u.nom_usuario, u.empresa
+         FROM ${schema}.tab_usuario u
+         JOIN ${schema}.tab_usuario_grupo ug ON ug.cod_usuario = u.cod_usuario
+        WHERE ug.cod_grupo = $1 AND u.ind_ativo = 'S'
+        ORDER BY u.nom_usuario ASC`,
+      [cod_grupo],
+    );
+
+    res.status(200).json({ message: result.rows });
+  } catch (error) {
+    res.status(500).json({ message: "Falha ao listar usuários do grupo: " + error });
+  }
+};
+
+//=> Busca usuário(s) por nome e devolve em quais grupos cada um está, com o
+// perfil/margem já configurado (se houver) — ajuda o admin a achar rápido
+// "em qual grupo mexer" para liberar autonomia de uma pessoa específica.
+exports.buscarUsuarioGrupo = async (req, res) => {
+  const { schema, busca } = req.body;
+
+  if (!busca || !busca.trim()) {
+    return res.status(200).json({ message: [] });
+  }
+
+  try {
+    const result = await db.query_trocaprecos(
+      `SELECT u.cod_usuario, u.nom_usuario,
+              json_agg(
+                json_build_object(
+                  'cod_grupo', g.cod_grupo,
+                  'des_grupo', g.des_grupo,
+                  'ind_perfil_aprovacao', p.ind_perfil_aprovacao,
+                  'val_margem_minima_autonomia', p.val_margem_minima_autonomia,
+                  'perfil_ativo', p.ind_ativo
+                ) ORDER BY g.des_grupo
+              ) AS grupos
+         FROM ${schema}.tab_usuario u
+         JOIN ${schema}.tab_usuario_grupo ug ON ug.cod_usuario = u.cod_usuario
+         JOIN ${schema}.tab_grupo_usuario g ON g.cod_grupo = ug.cod_grupo
+         LEFT JOIN ${schema}.tbl_grupo_perfil_aprovacao p ON p.cod_grupo = g.cod_grupo
+        WHERE u.ind_ativo = 'S' AND u.nom_usuario ILIKE $1
+        GROUP BY u.cod_usuario, u.nom_usuario
+        ORDER BY u.nom_usuario
+        LIMIT 20`,
+      [`%${busca.trim()}%`],
+    );
+
+    res.status(200).json({ message: result.rows });
+  } catch (error) {
+    res.status(500).json({ message: "Falha ao buscar usuário: " + error });
+  }
+};
+
+//=> Cria ou atualiza o perfil de autonomia de um GRUPO inteiro. Todo usuário
+// vinculado àquele grupo no EMSys3 passa a herdar a margem automaticamente.
+exports.atualizarPerfilGrupo = async (req, res) => {
+  const {
+    schema,
+    cod_grupo,
+    des_grupo,
+    ind_perfil_aprovacao,
+    val_margem_minima_autonomia,
+    des_justificativa,
+    cod_usuario_admin,
+    nom_usuario_admin,
+  } = req.body;
+
+  if (!des_justificativa || !des_justificativa.trim()) {
+    return res.status(400).json({ message: "Justificativa é obrigatória." });
+  }
+
+  try {
+    await db.query_trocaprecos("BEGIN");
+
+    const anterior = await db.query_trocaprecos(
+      `SELECT * FROM ${schema}.tbl_grupo_perfil_aprovacao WHERE cod_grupo = $1`,
+      [cod_grupo],
+    );
+
+    await db.query_trocaprecos(
+      `INSERT INTO ${schema}.tbl_grupo_perfil_aprovacao (
+         cod_grupo, des_grupo, ind_perfil_aprovacao,
+         val_margem_minima_autonomia, ind_ativo,
+         cod_usuario_alteracao, nom_usuario_alteracao, dta_alteracao
+       ) VALUES ($1, $2, $3, $4, 'S', $5, $6, NOW())
+       ON CONFLICT (cod_grupo) DO UPDATE SET
+         des_grupo = EXCLUDED.des_grupo,
+         ind_perfil_aprovacao = EXCLUDED.ind_perfil_aprovacao,
+         val_margem_minima_autonomia = EXCLUDED.val_margem_minima_autonomia,
+         ind_ativo = 'S',
+         cod_usuario_alteracao = EXCLUDED.cod_usuario_alteracao,
+         nom_usuario_alteracao = EXCLUDED.nom_usuario_alteracao,
+         dta_alteracao = NOW()`,
+      [
+        cod_grupo,
+        des_grupo,
+        ind_perfil_aprovacao,
+        val_margem_minima_autonomia,
+        cod_usuario_admin,
+        nom_usuario_admin,
+      ],
+    );
+
+    await db.query_trocaprecos(
+      `INSERT INTO ${schema}.tbl_historico_config_grupo (
+         cod_grupo, des_grupo, cod_usuario_admin, nom_usuario_admin,
+         ind_perfil_anterior, ind_perfil_novo,
+         val_margem_anterior, val_margem_nova,
+         des_justificativa, ip_origem
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      [
+        cod_grupo,
+        des_grupo,
+        cod_usuario_admin,
+        nom_usuario_admin,
+        anterior.rows[0]?.ind_perfil_aprovacao || null,
+        ind_perfil_aprovacao,
+        anterior.rows[0]?.val_margem_minima_autonomia || null,
+        val_margem_minima_autonomia,
+        des_justificativa,
+        req.ip,
+      ],
+    );
+
+    await db.query_trocaprecos("COMMIT");
+
+    res.status(200).json({ message: "Perfil do grupo atualizado com sucesso." });
+  } catch (error) {
+    await db.query_trocaprecos("ROLLBACK");
+    res.status(500).json({ message: "Falha ao atualizar perfil do grupo: " + error });
+  }
+};
+
+//=> Desativa o perfil de autonomia de um grupo (todos os usuários daquele
+// grupo voltam a exigir aprovação superior para qualquer margem).
+exports.desativarPerfilGrupo = async (req, res) => {
+  const { schema, cod_grupo, cod_usuario_admin, nom_usuario_admin, des_justificativa } = req.body;
+
+  if (!des_justificativa || !des_justificativa.trim()) {
+    return res.status(400).json({ message: "Justificativa é obrigatória." });
+  }
+
+  try {
+    await db.query_trocaprecos("BEGIN");
+
+    const anterior = await db.query_trocaprecos(
+      `SELECT * FROM ${schema}.tbl_grupo_perfil_aprovacao WHERE cod_grupo = $1`,
+      [cod_grupo],
+    );
+
+    await db.query_trocaprecos(
+      `UPDATE ${schema}.tbl_grupo_perfil_aprovacao
+          SET ind_ativo = 'N', cod_usuario_alteracao = $2,
+              nom_usuario_alteracao = $3, dta_alteracao = NOW()
+        WHERE cod_grupo = $1`,
+      [cod_grupo, cod_usuario_admin, nom_usuario_admin],
+    );
+
+    await db.query_trocaprecos(
+      `INSERT INTO ${schema}.tbl_historico_config_grupo (
+         cod_grupo, des_grupo, cod_usuario_admin, nom_usuario_admin,
+         ind_perfil_anterior, ind_perfil_novo,
+         val_margem_anterior, val_margem_nova,
+         des_justificativa, ip_origem
+       ) VALUES ($1, $2, $3, $4, $5, NULL, $6, NULL, $7, $8)`,
+      [
+        cod_grupo,
+        anterior.rows[0]?.des_grupo || null,
+        cod_usuario_admin,
+        nom_usuario_admin,
+        anterior.rows[0]?.ind_perfil_aprovacao || null,
+        anterior.rows[0]?.val_margem_minima_autonomia || null,
+        des_justificativa,
+        req.ip,
+      ],
+    );
+
+    await db.query_trocaprecos("COMMIT");
+
+    res.status(200).json({ message: "Perfil do grupo desativado com sucesso." });
+  } catch (error) {
+    await db.query_trocaprecos("ROLLBACK");
+    res.status(500).json({ message: "Falha ao desativar perfil do grupo: " + error });
+  }
+};
+
+//=> Histórico de alterações manuais de um grupo (auditoria da tela admin)
+exports.historicoConfigGrupo = async (req, res) => {
+  const { schema, cod_grupo } = req.body;
+
+  try {
+    const result = await db.query_trocaprecos(
+      `SELECT * FROM ${schema}.tbl_historico_config_grupo
+        WHERE cod_grupo = $1
+        ORDER BY dta_alteracao DESC
+        LIMIT 50`,
+      [cod_grupo],
+    );
+
+    res.status(200).json({ message: result.rows });
+  } catch (error) {
+    res.status(500).json({ message: "Falha ao buscar histórico: " + error });
   }
 };
 

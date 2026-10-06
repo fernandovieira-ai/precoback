@@ -1,0 +1,22 @@
+services:
+  postgres-local:
+    image: postgres:16-alpine
+    container_name: trocapreco-postgres-local
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${LOCAL_DB_USER:-drftrocapreco_local}
+      POSTGRES_PASSWORD: ${LOCAL_DB_PASSWORD:-localdev123}
+      POSTGRES_DB: ${LOCAL_DB_NAME:-drftrocapreco_local}
+    ports:
+      - "${LOCAL_DB_PORT:-5433}:5432"
+    volumes:
+      - pgdata_local:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${LOCAL_DB_USER:-drftrocapreco_local}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata_local:
+    name: trocapreco_pgdata_local
