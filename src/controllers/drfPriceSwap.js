@@ -1709,7 +1709,7 @@ exports.buscaMinhasNegociacoesDetalhe = async (req, res) => {
                                     ELSE c.des_forma_pagto
                                     END AS des_forma_pagto,
                                     a.cod_item, d.des_item, a.cod_pessoa, b.nom_pessoa, a.dta_inclusao, a.ind_excluido,
-                                    a.ind_percentual_valor, ind_tipo_negociacao, ind_tipo_preco_base, val_preco_venda_a, val_preco_venda_b, val_preco_venda_c, val_preco_venda_d, val_preco_venda_e, a.ind_status,
+                                    a.ind_percentual_valor, a.ind_tipo_negociacao, a.ind_tipo_preco_base, a.val_preco_venda_a, a.val_preco_venda_b, a.val_preco_venda_c, a.val_preco_venda_d, a.val_preco_venda_e, a.ind_status,
                                     e.val_custo_medio,
                                     e.val_preco_venda
                                     from ${schema}.tab_nova_regra a
@@ -2233,17 +2233,16 @@ exports.validarAutonomiaNegociacao = async (req, res) => {
     }
 
     const bloqueados = [];
-    let liberadosCount = 0;
-    let margemAutonomiaUsuario = null;
+    const validos = []; // itens com margem/empresa utilizáveis, na ordem em que serão enviados ao banco
 
-    for (const item of itens) {
+    itens.forEach((item) => {
       const margemBruta = item.margem_valor;
       const margem =
-        margemBruta !== null && margemBruta !== undefined
+        margemBruta !== null && margemBruta !== undefined && item.cod_empresa
           ? Math.round(Number(margemBruta) * 100) / 100
           : null;
 
-      if (margem === null || !item.cod_empresa) {
+      if (margem === null || Number.isNaN(margem)) {
         bloqueados.push({
           cod_item: item.cod_item,
           des_item: item.des_item,
@@ -2251,34 +2250,55 @@ exports.validarAutonomiaNegociacao = async (req, res) => {
           margem: null,
           motivo: "Não foi possível calcular a margem deste item.",
         });
-        continue;
+        return;
       }
 
-      const validacao = await db.query_trocaprecos(
-        `SELECT * FROM ${schema}.fn_validar_autonomia_aprovacao($1, $2, $3)`,
-        [cod_usuario, margem, item.cod_empresa],
+      validos.push({ ...item, margem });
+    });
+
+    let liberadosCount = 0;
+    let margemAutonomiaUsuario = null;
+
+    if (validos.length > 0) {
+      // Uma única query para todos os itens (em vez de uma por item): usa
+      // UNNEST para transformar os arrays recebidos em linhas e faz o LEFT
+      // JOIN LATERAL com fn_validar_autonomia_aprovacao por linha — mesmo
+      // padrão já usado (e testado em produção) por avaliarItensLote, só
+      // que aqui a "tabela" de entrada vem dos arrays em vez de uma tabela
+      // real, já que o lote ainda não existe no banco.
+      const result = await db.query_trocaprecos(
+        `SELECT f.pode_aprovar, f.perfil, f.margem_autonomia, f.motivo
+           FROM UNNEST($1::int[], $2::numeric[]) WITH ORDINALITY AS e(cod_empresa, margem, ord)
+           LEFT JOIN LATERAL (
+             SELECT * FROM ${schema}.fn_validar_autonomia_aprovacao($3, ROUND(e.margem, 2), e.cod_empresa)
+           ) f ON TRUE
+          ORDER BY e.ord`,
+        [validos.map((v) => v.cod_empresa), validos.map((v) => v.margem), cod_usuario],
       );
-      const row = validacao.rows[0];
-      const margemAutonomia =
-        row.margem_autonomia !== null ? Number(row.margem_autonomia) : null;
 
-      if (margemAutonomia !== null) {
-        margemAutonomiaUsuario = margemAutonomia;
-      }
+      result.rows.forEach((row, i) => {
+        const item = validos[i];
+        const margemAutonomia =
+          row.margem_autonomia !== null ? Number(row.margem_autonomia) : null;
 
-      if (row.perfil === "sem_perfil" || row.pode_aprovar) {
-        liberadosCount++;
-      } else {
-        bloqueados.push({
-          cod_item: item.cod_item,
-          des_item: item.des_item,
-          cod_empresa: item.cod_empresa,
-          margem,
-          perfil: row.perfil,
-          margem_autonomia: margemAutonomia,
-          motivo: row.motivo,
-        });
-      }
+        if (margemAutonomia !== null) {
+          margemAutonomiaUsuario = margemAutonomia;
+        }
+
+        if (row.perfil === "sem_perfil" || row.pode_aprovar) {
+          liberadosCount++;
+        } else {
+          bloqueados.push({
+            cod_item: item.cod_item,
+            des_item: item.des_item,
+            cod_empresa: item.cod_empresa,
+            margem: item.margem,
+            perfil: row.perfil,
+            margem_autonomia: margemAutonomia,
+            motivo: row.motivo,
+          });
+        }
+      });
     }
 
     res.status(200).json({
