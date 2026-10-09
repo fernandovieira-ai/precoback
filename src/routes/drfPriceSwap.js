@@ -85,6 +85,7 @@ router.post("/reprovaRegra", drfPriceSwap.reprovaRegra);
 
 //=> Sistema de Autonomia de Descontos
 router.post("/validarAutonomiaAprovacao", drfPriceSwap.validarAutonomiaAprovacao);
+router.post("/validarAutonomiaNegociacao", drfPriceSwap.validarAutonomiaNegociacao);
 
 router.post("/solicitarAprovacaoSuperior", drfPriceSwap.solicitarAprovacaoSuperior);
 
