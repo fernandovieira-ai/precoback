@@ -1624,14 +1624,14 @@ exports.buscaNegociacoesEmpresa = async (req, res) => {
     await db.query_trocaprecos("BEGIN");
 
     const result =
-      await db.query_trocaprecos(`SELECT a.dta_inclusao, a.seq_lote_alteracao, b.nom_fantasia, b.cod_empresa, a.ind_excluido, COUNT(*) AS total_registros, c.progresso, c.total, c.error, a.des_observacao
+      await db.query_trocaprecos(`SELECT a.dta_inclusao, a.seq_lote_alteracao, b.nom_fantasia, b.cod_empresa, a.ind_excluido, COUNT(*) AS total_registros, c.progresso, c.total, c.error, a.des_observacao, a.nom_usuario
                                           FROM ${schema}.tab_nova_regra a
                                           inner join ${schema}.tab_empresa_schema b on (a.cod_empresa = b.cod_empresa)
                                           inner join ${schema}.tab_progresso_lote c on (a.seq_lote_alteracao = c.seq_lote)
                                           where a.cod_empresa in (${cod_empresa})
                                           and a.ind_excluido != 'S'
                                           and a.ind_status = 'X'
-                                          group by 1,3,2,4,5,7,8,9,10
+                                          group by 1,3,2,4,5,7,8,9,10,11
                                           order by a.dta_inclusao desc, a.seq_lote_alteracao desc`);
 
     await db.query_trocaprecos("COMMIT");
